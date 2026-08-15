@@ -1,0 +1,78 @@
+spring:
+  main:
+    allow-bean-definition-overriding: true
+  application:
+    name: spring-ai-demo
+  # 启动时自动执行 schema.sql 建表
+  sql:
+    init:
+      mode: always
+  autoconfigure:
+    exclude:
+      - dev.langchain4j.openai.spring.AutoConfig
+  # 异步请求超时（SSE 流式输出最长 5 分钟，防止连接泄漏）
+  mvc:
+    async:
+      request-timeout: 300000
+
+  # 文件上传大小限制（PDF/Word 简历可能超过 1MB 默认值）
+  servlet:
+    multipart:
+      max-file-size: 20MB
+      max-request-size: 50MB
+
+  # PostgreSQL 数据源（连 PgVector 容器）
+  datasource:
+    url: jdbc:postgresql://localhost:5432/vectordb
+    username: postgres
+    password: postgres
+    driver-class-name: org.postgresql.Driver
+
+  # Redis 缓存（缓存高频检索结果和 AI 回答，知识库更新时自动清除）
+  data:
+    redis:
+      host: localhost
+      port: 6379
+      password:              # 无密码则留空
+      database: 0            # 使用 0 号库
+      timeout: 3000ms        # 连接超时
+      lettuce:
+        pool:
+          max-active: 8      # 连接池最大连接数
+          max-idle: 4        # 连接池最大空闲连接
+          min-idle: 1        # 连接池最小空闲连接
+
+  ai:
+    openai:
+      api-key: ${DASHSCOPE_API_KEY}   # 百炼 API Key，通过环境变量 DASHSCOPE_API_KEY 配置
+      base-url: https://dashscope.aliyuncs.com/compatible-mode  # 注意：去掉 /v1，Spring AI 会自动拼接
+      chat:
+        options:
+          model: qwen-plus            # 模型名，可换 qwen-turbo / qwen-max / deepseek-v3
+          temperature: 0.7
+      embedding:
+        options:
+          model: text-embedding-v3    # 百炼向量化模型，默认输出 1024 维
+    # PgVector 向量库配置
+    vectorstore:
+      pgvector:
+        table-name: kb_vector         # 自定义表名（默认 vector_store），统一 kb_ 前缀
+        index-type: HNSW              # 索引类型：HNSW（推荐）或 IVFFLAT
+        distance-type: COSINE_DISTANCE # 距离类型：余弦距离（对应前面的余弦相似度）
+        dimensions: 1024              # 向量维度，必须和 embedding 模型一致
+        initialize-schema: true       # 启动时自动创建 kb_vector 表（含 HNSW 索引）
+    # ---- LangChain4j 配置 ----
+langchain4j:
+    open-ai:
+      chat-model:
+          api-key: ${DASHSCOPE_API_KEY}
+          base-url: https://dashscope.aliyuncs.com/compatible-mode/v1
+          model-name: qwen-plus
+          temperature: 0.7
+          max-tokens: 2000
+          log-requests: true
+          log-responses: false
+      embedding-model:
+          api-key: ${DASHSCOPE_API_KEY}
+          base-url: https://dashscope.aliyuncs.com/compatible-mode/v1
+          model-name: text-embedding-v3

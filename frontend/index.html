@@ -1,0 +1,818 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>知识库管理系统</title>
+    <link rel="stylesheet" href="style.css">
+    <script src="https://unpkg.com/vue@3/dist/vue.global.js"></script>
+</head>
+<body>
+
+<div id="app">
+    <!-- 加载遮罩 -->
+    <div v-if="loading" class="loading-overlay">
+        <div class="spinner"></div>
+    </div>
+
+    <!-- Toast 提示 -->
+    <div v-if="toast.show" :class="['toast', 'toast-' + toast.type]">
+        {{ toast.message }}
+    </div>
+
+    <div class="app-layout">
+        <!-- 侧边栏 -->
+        <aside class="sidebar">
+            <div class="sidebar-header">
+                <h1>知识库管理</h1>
+                <p>Spring AI + PgVector</p>
+            </div>
+            <nav class="nav-menu">
+                <div v-for="tab in tabs" :key="tab.key"
+                     :class="['nav-item', { active: activeTab === tab.key }]"
+                     @click="switchTab(tab.key)">
+                    <span class="nav-icon">{{ tab.icon }}</span>
+                    <span>{{ tab.label }}</span>
+                </div>
+            </nav>
+            <div class="sidebar-footer">
+                v1.0 &copy; 2026
+            </div>
+        </aside>
+
+        <!-- 主内容区 -->
+        <main class="main-content">
+
+            <!-- ========== 仪表盘 ========== -->
+            <div v-if="activeTab === 'dashboard'">
+                <h2 class="page-title">仪表盘</h2>
+                <div class="stats-grid">
+                    <div class="stat-card">
+                        <div class="stat-value">{{ stats.totalDocuments ?? '-' }}</div>
+                        <div class="stat-label">文档总数</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value" style="color: var(--success)">{{ stats.readyDocuments ?? '-' }}</div>
+                        <div class="stat-label">就绪文档</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value" style="color: var(--warning)">{{ stats.processingDocuments ?? '-' }}</div>
+                        <div class="stat-label">处理中</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value" style="color: var(--danger)">{{ stats.failedDocuments ?? '-' }}</div>
+                        <div class="stat-label">处理失败</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value">{{ stats.totalChunks ?? '-' }}</div>
+                        <div class="stat-label">分块总数</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value">{{ stats.totalVectors ?? '-' }}</div>
+                        <div class="stat-label">向量总数</div>
+                    </div>
+                </div>
+
+                <div class="card" style="margin-top: 24px;">
+                    <div class="card-title">快捷操作</div>
+                    <div style="display: flex; gap: 12px; flex-wrap: wrap;">
+                        <button class="btn btn-primary" @click="switchTab('documents')">上传文档</button>
+                        <button class="btn btn-outline" @click="switchTab('search')">语义检索</button>
+                        <button class="btn btn-outline" @click="switchTab('rag')">RAG 问答</button>
+                        <button class="btn btn-outline" @click="loadStats">刷新统计</button>
+                        <button class="btn btn-outline" @click="rebuildAll" :disabled="loading">全量重建向量</button>
+                        <button class="btn btn-outline" @click="rebuildFailed" :disabled="loading">重试失败文档</button>
+                        <button class="btn btn-outline" @click="switchTab('versions')">灰度重建（版本管理）</button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- ========== 文档管理 ========== -->
+            <div v-if="activeTab === 'documents'">
+                <h2 class="page-title">文档管理</h2>
+
+                <!-- 上传区域 -->
+                <div class="card">
+                    <div class="card-title">上传文档</div>
+                    <div class="upload-area" @click="$refs.fileInput.click()" @dragover.prevent="dragover = true" @dragleave="dragover = false" @drop.prevent="handleDrop" :class="{ dragover }">
+                        <div style="font-size: 36px;">+</div>
+                        <p>点击或拖拽文件到此处上传</p>
+                        <p style="font-size: 12px;">支持 .txt / .md / .pdf / .doc / .docx</p>
+                    </div>
+                    <input ref="fileInput" type="file" style="display: none"
+                           accept=".txt,.md,.markdown,.pdf,.doc,.docx"
+                           @change="handleFileSelect">
+
+                    <div v-if="uploadFile" class="file-info" style="margin-top: 12px;">
+                        <span>📄</span>
+                        <span style="flex: 1;">{{ uploadFile.name }} ({{ formatSize(uploadFile.size) }})</span>
+                        <button class="btn btn-sm btn-outline" @click="uploadFile = null">移除</button>
+                    </div>
+
+                    <div class="form-row" style="margin-top: 12px;">
+                        <div class="form-group">
+                            <label class="form-label">分块大小 (字符)</label>
+                            <input type="number" class="form-input" v-model.number="uploadChunkSize" min="1" max="10000">
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">重叠大小 (字符)</label>
+                            <input type="number" class="form-input" v-model.number="uploadOverlap" min="0" max="1000">
+                        </div>
+                    </div>
+                    <div class="form-row" style="margin-top: 12px;">
+                        <div class="form-group">
+                            <label class="form-label">文档分类（可选）</label>
+                            <input type="text" class="form-input" v-model="uploadCategory" placeholder="如：技术/产品/管理">
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">文档来源/作者（可选）</label>
+                            <input type="text" class="form-input" v-model="uploadAuthor" placeholder="如：公司官网/某作者">
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">文档日期（可选）</label>
+                            <input type="date" class="form-input" v-model="uploadDocDate">
+                        </div>
+                    </div>
+                    <button class="btn btn-primary" @click="uploadDocument" :disabled="!uploadFile">开始上传</button>
+                </div>
+
+                <!-- 文档列表 -->
+                <div class="card">
+                    <div class="card-title">文档列表</div>
+                    <div class="form-row" style="margin-bottom: 16px;">
+                        <div class="form-group">
+                            <select class="form-select" v-model="docStatusFilter" @change="loadDocuments">
+                                <option value="">全部状态</option>
+                                <option value="READY">就绪</option>
+                                <option value="PROCESSING">处理中</option>
+                                <option value="FAILED">失败</option>
+                                <option value="PENDING">待处理</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <button class="btn btn-outline" @click="loadDocuments">刷新</button>
+                        </div>
+                    </div>
+
+                    <div v-if="documents.length === 0" class="empty-state">
+                        <div style="font-size: 36px;">📭</div>
+                        <p>暂无文档，请先上传</p>
+                    </div>
+
+                    <div v-else class="table-wrap">
+                        <table>
+                            <thead>
+                                <tr>
+                                    <th>ID</th>
+                                    <th>标题</th>
+                                    <th>格式</th>
+                                    <th>分类</th>
+                                    <th>大小</th>
+                                    <th>状态</th>
+                                    <th>分块数</th>
+                                    <th>创建时间</th>
+                                    <th>操作</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <tr v-for="doc in documents" :key="doc.id">
+                                    <td>{{ doc.id }}</td>
+                                    <td style="max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">{{ doc.title }}</td>
+                                    <td>.{{ doc.fileFormat }}</td>
+                                    <td>{{ doc.category || '-' }}</td>
+                                    <td>{{ formatSize(doc.fileSize) }}</td>
+                                    <td><span :class="['badge', 'badge-' + doc.status.toLowerCase()]">{{ doc.status }}</span></td>
+                                    <td>{{ doc.chunkCount }}</td>
+                                    <td>{{ formatTime(doc.createdAt) }}</td>
+                                    <td>
+                                        <div style="display: flex; gap: 4px;">
+                                            <button class="btn btn-sm btn-outline" @click="viewDocument(doc.id)">详情</button>
+                                            <button class="btn btn-sm btn-outline" @click="showResplitModal(doc)" title="重新切分">切分</button>
+                                            <button class="btn btn-sm btn-outline" @click="reindexDocument(doc.id)" title="重新向量化">向量化</button>
+                                            <button class="btn btn-sm btn-danger" @click="deleteDocument(doc.id)">删除</button>
+                                        </div>
+                                    </td>
+                                </tr>
+                            </tbody>
+                        </table>
+
+                        <div class="pagination">
+                            <button class="btn btn-sm btn-outline" :disabled="docPage === 0" @click="docPage--; loadDocuments()">上一页</button>
+                            <span>第 {{ docPage + 1 }} 页 / 共 {{ Math.ceil(docTotal / docSize) || 1 }} 页 ({{ docTotal }} 条)</span>
+                            <button class="btn btn-sm btn-outline" :disabled="(docPage + 1) * docSize >= docTotal" @click="docPage++; loadDocuments()">下一页</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- ========== 分块管理 ========== -->
+            <div v-if="activeTab === 'chunks'">
+                <h2 class="page-title">分块管理</h2>
+
+                <div class="card">
+                    <div class="card-title">选择文档</div>
+                    <div class="form-row">
+                        <div class="form-group">
+                            <select class="form-select" v-model="chunkDocId" @change="loadChunks">
+                                <option value="">请选择文档...</option>
+                                <option v-for="doc in allDocuments" :key="doc.id" :value="doc.id">
+                                    [{{ doc.id }}] {{ doc.title }} ({{ doc.chunkCount }} 块)
+                                </option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <button class="btn btn-outline" @click="loadAllDocuments">刷新文档列表</button>
+                        </div>
+                    </div>
+                </div>
+
+                <div v-if="chunks.length === 0 && chunkDocId" class="empty-state">
+                    <div style="font-size: 36px;">📭</div>
+                    <p>该文档暂无分块</p>
+                </div>
+
+                <div v-for="chunk in chunks" :key="chunk.id" class="card" style="padding: 16px;">
+                    <div style="display: flex; justify-content: space-between; align-items: start; margin-bottom: 8px;">
+                        <div>
+                            <span style="font-weight: 600;">#{{ chunk.chunkIndex }}</span>
+                            <span style="color: var(--text-muted); font-size: 12px; margin-left: 12px;">
+                                {{ chunk.contentLength }} 字符
+                            </span>
+                            <span v-if="chunk.vectorId" style="color: var(--success); font-size: 12px; margin-left: 8px;">已向量化</span>
+                            <span v-else style="color: var(--warning); font-size: 12px; margin-left: 8px;">未向量化</span>
+                        </div>
+                        <div style="display: flex; gap: 4px;">
+                            <button class="btn btn-sm btn-outline" @click="viewChunkDetail(chunk.id)">详情</button>
+                            <button class="btn btn-sm btn-outline" @click="showEditChunkModal(chunk)">编辑</button>
+                            <button class="btn btn-sm btn-danger" @click="deleteChunk(chunk.id)">删除</button>
+                        </div>
+                    </div>
+                    <div style="font-size: 13px; color: var(--text); line-height: 1.6;">{{ chunk.content }}</div>
+                </div>
+            </div>
+
+            <!-- ========== 向量检索 ========== -->
+            <div v-if="activeTab === 'search'">
+                <h2 class="page-title">向量检索</h2>
+
+                <div class="card">
+                    <div class="card-title">语义搜索</div>
+                    <div class="form-group">
+                        <label class="form-label">查询内容</label>
+                        <textarea class="form-textarea" v-model="searchQuery" placeholder="输入要检索的问题或关键词..."></textarea>
+                    </div>
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label class="form-label">Top K</label>
+                            <input type="number" class="form-input" v-model.number="searchTopK" min="1" max="50">
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">相似度阈值 (0~1)</label>
+                            <input type="number" class="form-input" v-model.number="searchThreshold" min="0" max="1" step="0.1">
+                        </div>
+                    </div>
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label class="form-label">多路召回</label>
+                            <label style="display: flex; align-items: center; gap: 6px; cursor: pointer;">
+                                <input type="checkbox" v-model="searchHybrid"> 启用向量+关键词+元数据融合检索
+                            </label>
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">Query 改写</label>
+                            <label style="display: flex; align-items: center; gap: 6px; cursor: pointer;">
+                                <input type="checkbox" v-model="searchRewrite"> LLM 改写问题，多视角召回提升命中率
+                            </label>
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">Cross-Encoder 重排序</label>
+                            <label style="display: flex; align-items: center; gap: 6px; cursor: pointer;">
+                                <input type="checkbox" v-model="searchRerank" :disabled="!searchHybrid && !searchRewrite"> RRF 融合后用 qwen3-rerank 二次精排
+                            </label>
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">指定文档（可选）</label>
+                            <select class="form-select" v-model="searchSourceFilter">
+                                <option value="">全部文档</option>
+                                <option v-for="doc in allDocuments.filter(d => d.status === 'READY')" :key="doc.id" :value="doc.fileName">
+                                    {{ doc.title || doc.fileName }}
+                                </option>
+                            </select>
+                        </div>
+                    </div>
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label class="form-label">分类（可选）</label>
+                            <select class="form-select" v-model="searchCategory">
+                                <option value="">全部分类</option>
+                                <option v-for="cat in categories" :key="cat" :value="cat">{{ cat }}</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">来源/作者（可选）</label>
+                            <select class="form-select" v-model="searchAuthor">
+                                <option value="">全部来源</option>
+                                <option v-for="a in authors" :key="a" :value="a">{{ a }}</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">日期从（可选）</label>
+                            <input type="date" class="form-input" v-model="searchDateFrom">
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">日期到（可选）</label>
+                            <input type="date" class="form-input" v-model="searchDateTo">
+                        </div>
+                    </div>
+                    <div style="display: flex; gap: 12px; margin-top: 12px;">
+                        <button class="btn btn-primary" @click="doSearch" :disabled="!searchQuery.trim()">检索</button>
+                        <button class="btn btn-outline" @click="clearSearchFilters">清除过滤</button>
+                    </div>
+                </div>
+
+                <div v-if="searchResults.length > 0" class="card">
+                    <div class="card-title">
+                        检索结果 ({{ searchResults.length }} 条)
+                        <span v-if="searchCached" style="font-size: 12px; padding: 2px 8px; border-radius: 4px; background: #e8f5e9; color: #2e7d32; margin-left: 8px;">Redis 缓存命中</span>
+                        <span v-if="searchReranked" style="font-size: 12px; padding: 2px 8px; border-radius: 4px; background: #fce7f3; color: #be185d; margin-left: 8px;">Cross-Encoder 重排序</span>
+                        <span v-if="searchRewrite" style="font-size: 12px; padding: 2px 8px; border-radius: 4px; background: #fef3c7; color: #b45309; margin-left: 8px;">Query 改写 + 多 Query RRF 融合</span>
+                        <span v-else-if="searchHybrid" style="font-size: 12px; padding: 2px 8px; border-radius: 4px; background: #ede9fe; color: #7c3aed; margin-left: 8px;">多路召回 + RRF 融合</span>
+                        <span v-else style="font-size: 12px; padding: 2px 8px; border-radius: 4px; background: #f5f5f5; color: #666; margin-left: 8px;">单路向量检索</span>
+                    </div>
+                    <div v-if="searchRewrite && searchRewrittenQueries.length > 0" style="font-size: 13px; color: var(--text-muted); margin-bottom: 12px; padding: 8px 12px; background: #fffbeb; border-radius: 6px; border-left: 3px solid #f59e0b;">
+                        <strong>LLM 改写的子查询：</strong>
+                        <div v-for="(q, i) in searchRewrittenQueries" :key="i" style="margin-top: 4px; padding-left: 12px;">
+                            {{ i + 1 }}. {{ q }}
+                        </div>
+                    </div>
+                    <div v-if="searchHybrid && searchChannels" style="font-size: 13px; color: var(--text-muted); margin-bottom: 12px; padding: 8px 12px; background: #f8f5ff; border-radius: 6px;">
+                        通道命中统计 → 向量: {{ searchChannels.vector }} 条 | 关键词: {{ searchChannels.keyword }} 条 | 元数据: {{ searchChannels.metadata }} 条
+                    </div>
+                    <div v-for="(item, idx) in searchResults" :key="idx" class="result-item">
+                        <div class="result-content">{{ item.content }}</div>
+                        <div class="result-meta">
+                            来源: {{ item.metadata?.source || '未知' }} |
+                            <span v-if="item.rerankScore" style="color: #be185d; font-weight: 600;">重排序分: {{ item.rerankScore }} |</span>
+                            <span v-if="item.rrfScore">RRF: {{ item.rrfScore }} | 命中通道: {{ Array.from(item.hitChannels || []).join(', ') }}</span>
+                            <span v-else>相似度距离: {{ item.score ?? '-' }}</span>
+                        </div>
+                    </div>
+                </div>
+                <div v-else-if="searchDone" class="empty-state">
+                    <div style="font-size: 36px;">🔍</div>
+                    <p v-if="searchDegradeLevel === 'OFFLINE'" style="color: #d32f2f;">⚠️ 向量检索服务不可用，请稍后重试</p>
+                    <p v-else>未检索到相关内容</p>
+                </div>
+            </div>
+
+            <!-- ========== RAG 问答 ========== -->
+            <div v-if="activeTab === 'rag'">
+                <h2 class="page-title">RAG 问答</h2>
+
+                <div class="card">
+                    <div class="card-title">提出问题</div>
+                    <div class="form-group">
+                        <label class="form-label">问题</label>
+                        <textarea class="form-textarea" v-model="ragQuestion" placeholder="基于知识库内容提问..."></textarea>
+                    </div>
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label class="form-label">Top K</label>
+                            <input type="number" class="form-input" v-model.number="ragTopK" min="1" max="50">
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">相似度阈值 (0~1)</label>
+                            <input type="number" class="form-input" v-model.number="ragThreshold" min="0" max="1" step="0.1">
+                        </div>
+                    </div>
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label class="form-label">多路召回</label>
+                            <label style="display: flex; align-items: center; gap: 6px; cursor: pointer;">
+                                <input type="checkbox" v-model="ragHybrid"> 启用向量+关键词+元数据融合检索
+                            </label>
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">Query 改写</label>
+                            <label style="display: flex; align-items: center; gap: 6px; cursor: pointer;">
+                                <input type="checkbox" v-model="ragRewrite"> LLM 改写问题，多视角召回提升命中率
+                            </label>
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">Cross-Encoder 重排序</label>
+                            <label style="display: flex; align-items: center; gap: 6px; cursor: pointer;">
+                                <input type="checkbox" v-model="ragRerank" :disabled="!ragHybrid && !ragRewrite"> RRF 融合后用 qwen3-rerank 二次精排
+                            </label>
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">指定文档（可选）</label>
+                            <select class="form-select" v-model="ragSourceFilter">
+                                <option value="">全部文档</option>
+                                <option v-for="doc in allDocuments.filter(d => d.status === 'READY')" :key="doc.id" :value="doc.fileName">
+                                    {{ doc.title || doc.fileName }}
+                                </option>
+                            </select>
+                        </div>
+                    </div>
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label class="form-label">多轮对话会话 ID（可选）</label>
+                            <div style="display: flex; gap: 8px; align-items: center;">
+                                <input type="text" class="form-input" v-model="ragConversationId" placeholder="输入会话ID开启多轮对话记忆">
+                                <button class="btn btn-outline" @click="clearRagConversation" style="white-space: nowrap;">清除记忆</button>
+                            </div>
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">流式输出</label>
+                            <label style="display: flex; align-items: center; gap: 6px; cursor: pointer;">
+                                <input type="checkbox" v-model="ragStreamMode"> SSE 逐 token 输出，实时显示 AI 回答
+                            </label>
+                        </div>
+                    </div>
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label class="form-label">分类（可选）</label>
+                            <select class="form-select" v-model="ragCategory">
+                                <option value="">全部分类</option>
+                                <option v-for="cat in categories" :key="cat" :value="cat">{{ cat }}</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">来源/作者（可选）</label>
+                            <select class="form-select" v-model="ragAuthor">
+                                <option value="">全部来源</option>
+                                <option v-for="a in authors" :key="a" :value="a">{{ a }}</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">日期从（可选）</label>
+                            <input type="date" class="form-input" v-model="ragDateFrom">
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">日期到（可选）</label>
+                            <input type="date" class="form-input" v-model="ragDateTo">
+                        </div>
+                    </div>
+                    <div style="display: flex; gap: 12px; margin-top: 12px;">
+                        <button v-if="!ragStreamMode" class="btn btn-primary" @click="askRAG" :disabled="!ragQuestion.trim() || ragLoading">
+                            {{ ragLoading ? '生成中...' : '提问' }}
+                        </button>
+                        <button v-if="ragStreamMode" class="btn btn-primary" @click="askRagStream" :disabled="!ragQuestion.trim() || ragStreaming">
+                            {{ ragStreaming ? '流式输出中...' : '流式提问' }}
+                        </button>
+                        <button v-if="ragStreamMode && ragStreaming" class="btn btn-outline" @click="stopRagStream">停止</button>
+                        <button class="btn btn-outline" @click="clearRagFilters">清除过滤</button>
+                    </div>
+                </div>
+
+                <div v-if="ragStreamMode && (ragStreaming || ragStreamAnswer)" class="card">
+                    <div class="card-title">
+                        流式回答
+                        <span v-if="ragStreaming" style="font-size: 12px; padding: 2px 8px; border-radius: 4px; background: #dbeafe; color: #1d4ed8; margin-left: 8px;">生成中...</span>
+                        <span v-if="ragConversationId" style="font-size: 12px; padding: 2px 8px; border-radius: 4px; background: #e0f2fe; color: #0284c7; margin-left: 8px;">多轮对话: {{ ragConversationId }}</span>
+                    </div>
+                    <div class="rag-answer">{{ ragStreamAnswer }}<span v-if="ragStreaming" style="animation: blink 1s infinite; color: var(--primary);">▌</span></div>
+                </div>
+
+                <div v-if="ragResult" class="card">
+                    <div class="card-title">
+                        回答
+                        <span v-if="ragResult.cached" style="font-size: 12px; padding: 2px 8px; border-radius: 4px; background: #e8f5e9; color: #2e7d32; margin-left: 8px;">Redis 缓存命中</span>
+                        <span v-if="ragResult.reranked" style="font-size: 12px; padding: 2px 8px; border-radius: 4px; background: #fce7f3; color: #be185d; margin-left: 8px;">Cross-Encoder 重排序</span>
+                        <span v-if="ragResult.degradeLevel === 'RETRIEVAL_FALLBACK'" style="font-size: 12px; padding: 2px 8px; border-radius: 4px; background: #fff3e0; color: #e65100; margin-left: 8px;">⚠️ 检索兜底（LLM 不可用）</span>
+                        <span v-else-if="ragResult.degradeLevel === 'OFFLINE'" style="font-size: 12px; padding: 2px 8px; border-radius: 4px; background: #ffebee; color: #c62828; margin-left: 8px;">⚠️ 服务降级</span>
+                        <span v-else-if="ragResult.searchMode === 'REWRITE_HYBRID'" style="font-size: 12px; padding: 2px 8px; border-radius: 4px; background: #fef3c7; color: #b45309; margin-left: 8px;">Query 改写 + 多 Query RRF 融合</span>
+                        <span v-else-if="ragResult.searchMode === 'HYBRID'" style="font-size: 12px; padding: 2px 8px; border-radius: 4px; background: #ede9fe; color: #7c3aed; margin-left: 8px;">多路召回 + RRF 融合</span>
+                        <span v-else style="font-size: 12px; padding: 2px 8px; border-radius: 4px; background: #f5f5f5; color: #666; margin-left: 8px;">单路向量检索 + LLM 生成</span>
+                    </div>
+                    <div v-if="ragResult.rewrittenQueries && ragResult.rewrittenQueries.length > 0" style="font-size: 13px; color: var(--text-muted); margin-bottom: 12px; padding: 8px 12px; background: #fffbeb; border-radius: 6px; border-left: 3px solid #f59e0b;">
+                        <strong>LLM 改写的子查询：</strong>
+                        <div v-for="(q, i) in ragResult.rewrittenQueries" :key="i" style="margin-top: 4px; padding-left: 12px;">
+                            {{ i + 1 }}. {{ q }}
+                        </div>
+                    </div>
+                    <div class="rag-answer">{{ ragResult.answer }}</div>
+
+                    <div v-if="ragResult.sources && ragResult.sources.length > 0" class="rag-sources">
+                        <div style="font-size: 14px; font-weight: 600; margin-bottom: 8px;">
+                            参考来源 ({{ ragResult.retrievedChunks }} 个段落)
+                        </div>
+                        <div v-for="(src, idx) in ragResult.sources" :key="idx" class="rag-source-item">
+                            <strong>段落 {{ idx + 1 }}</strong> |
+                            来源: {{ src.source || '未知' }} |
+                            距离: {{ src.score ?? '-' }}
+                            <div style="margin-top: 4px; color: var(--text-muted);">{{ src.content }}</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- ========== 索引版本管理 ========== -->
+            <div v-if="activeTab === 'versions'">
+                <h2 class="page-title">索引版本管理</h2>
+
+                <!-- 当前活跃版本 -->
+                <div class="card">
+                    <div class="card-title">当前活跃版本</div>
+                    <div v-if="activeVersion">
+                        <div class="detail-grid">
+                            <div class="detail-label">版本号</div>
+                            <div class="detail-value">{{ activeVersion.versionLabel }} (ID: {{ activeVersion.id }})</div>
+                            <div class="detail-label">状态</div>
+                            <div class="detail-value">
+                                <span :class="['badge', 'badge-ready']">{{ activeVersion.status }}</span>
+                            </div>
+                            <div class="detail-label">描述</div>
+                            <div class="detail-value">{{ activeVersion.description || '-' }}</div>
+                            <div class="detail-label">向量数</div>
+                            <div class="detail-value">{{ activeVersion.vectorCount }}</div>
+                            <div class="detail-label">激活时间</div>
+                            <div class="detail-value">{{ formatTime(activeVersion.activatedAt) }}</div>
+                        </div>
+                    </div>
+                    <div v-else class="empty-state">
+                        <div style="font-size: 36px;">🔄</div>
+                        <p>尚未初始化版本管理</p>
+                        <p style="font-size: 12px; color: var(--text-muted); margin-bottom: 12px;">
+                            初始化后，新向量将自动标记版本号，支持灰度切换和一键回滚
+                        </p>
+                        <button class="btn btn-primary" @click="initFirstVersion" :disabled="loading">初始化首个版本</button>
+                    </div>
+                </div>
+
+                <!-- 灰度重建 -->
+                <div class="card">
+                    <div class="card-title">灰度重建（新版本构建 + 原子切换）</div>
+                    <p style="color: var(--text-muted); margin-bottom: 12px; font-size: 13px;">
+                        创建新版本 → 全量重新向量化 → 构建完成后原子切换。<br>
+                        ★ 构建期间不影响线上检索（旧版本仍 ACTIVE）<br>
+                        ★ 切换后可一键回滚（旧版本向量保留）
+                    </p>
+                    <div class="form-group">
+                        <label class="form-label">版本描述（可选）</label>
+                        <input type="text" class="form-input" v-model="rebuildVersionDesc" placeholder="如：embedding模型升级到v3">
+                    </div>
+                    <button class="btn btn-primary" @click="rebuildWithNewVersion" :disabled="loading || !activeVersion">
+                        {{ loading ? '重建中...' : '灰度重建并切换' }}
+                    </button>
+                    <span v-if="!activeVersion" style="margin-left: 12px; color: var(--text-muted); font-size: 12px;">
+                        请先初始化首个版本
+                    </span>
+                </div>
+
+                <!-- 版本列表 -->
+                <div class="card">
+                    <div class="card-title">版本列表</div>
+                    <div style="margin-bottom: 12px;">
+                        <button class="btn btn-sm btn-outline" @click="loadVersions">刷新</button>
+                    </div>
+                    <div v-if="versions.length === 0" class="empty-state">
+                        <div style="font-size: 36px;">📭</div>
+                        <p>暂无版本记录</p>
+                    </div>
+                    <div v-else class="table-wrap">
+                        <table>
+                            <thead>
+                                <tr>
+                                    <th>ID</th>
+                                    <th>版本</th>
+                                    <th>状态</th>
+                                    <th>描述</th>
+                                    <th>向量数</th>
+                                    <th>文档数</th>
+                                    <th>创建时间</th>
+                                    <th>激活时间</th>
+                                    <th>操作</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <tr v-for="v in versions" :key="v.id">
+                                    <td>{{ v.id }}</td>
+                                    <td style="font-weight: 600;">{{ v.versionLabel }}</td>
+                                    <td>
+                                        <span :class="['badge', v.status === 'ACTIVE' ? 'badge-ready' : v.status === 'BUILDING' ? 'badge-processing' : 'badge-pending']">
+                                            {{ v.status }}
+                                        </span>
+                                    </td>
+                                    <td style="max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">{{ v.description || '-' }}</td>
+                                    <td>{{ v.vectorCount }}</td>
+                                    <td>{{ v.documentCount }}</td>
+                                    <td>{{ formatTime(v.createdAt) }}</td>
+                                    <td>{{ formatTime(v.activatedAt) }}</td>
+                                    <td>
+                                        <div style="display: flex; gap: 4px;">
+                                            <button v-if="v.status === 'BUILDING'" class="btn btn-sm btn-outline"
+                                                    @click="activateVersion(v.id, v.versionLabel)" title="激活此版本">激活</button>
+                                            <button v-if="v.status === 'ARCHIVED'" class="btn btn-sm btn-outline"
+                                                    @click="rollbackToVersion(v.id, v.versionLabel)" title="回滚到此版本">回滚</button>
+                                            <button v-if="v.status !== 'ACTIVE'" class="btn btn-sm btn-danger"
+                                                    @click="cleanupVersion(v.id, v.versionLabel)" title="清理此版本的向量">清理</button>
+                                        </div>
+                                    </td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+
+        </main>
+    </div>
+
+    <!-- ========== 文档详情模态框 ========== -->
+    <div v-if="showDocDetail" class="modal-overlay" @click.self="showDocDetail = false">
+        <div class="modal">
+            <div class="modal-header">
+                <h3>文档详情</h3>
+                <button class="modal-close" @click="showDocDetail = false">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div v-if="docDetail">
+                    <div class="detail-grid">
+                        <div class="detail-label">ID</div>
+                        <div class="detail-value">{{ docDetail.document.id }}</div>
+                        <div class="detail-label">标题</div>
+                        <div class="detail-value">{{ docDetail.document.title }}</div>
+                        <div class="detail-label">文件名</div>
+                        <div class="detail-value">{{ docDetail.document.fileName }}</div>
+                        <div class="detail-label">格式</div>
+                        <div class="detail-value">.{{ docDetail.document.fileFormat }}</div>
+                        <div class="detail-label">大小</div>
+                        <div class="detail-value">{{ formatSize(docDetail.document.fileSize) }}</div>
+                        <div class="detail-label">状态</div>
+                        <div class="detail-value">
+                            <span :class="['badge', 'badge-' + docDetail.document.status.toLowerCase()]">{{ docDetail.document.status }}</span>
+                        </div>
+                        <div class="detail-label">分块数</div>
+                        <div class="detail-value">{{ docDetail.document.chunkCount }}</div>
+                        <div class="detail-label">分块大小</div>
+                        <div class="detail-value">{{ docDetail.document.chunkSize }} 字符</div>
+                        <div class="detail-label">重叠</div>
+                        <div class="detail-value">{{ docDetail.document.overlap }} 字符</div>
+                        <div class="detail-label">分类</div>
+                        <div class="detail-value">{{ docDetail.document.category || '-' }}</div>
+                        <div class="detail-label">来源/作者</div>
+                        <div class="detail-value">{{ docDetail.document.author || '-' }}</div>
+                        <div class="detail-label">文档日期</div>
+                        <div class="detail-value">{{ docDetail.document.docDate || '-' }}</div>
+                        <div class="detail-label">内容哈希</div>
+                        <div class="detail-value" style="font-family: monospace; font-size: 12px;">{{ docDetail.document.contentHash }}</div>
+                        <div v-if="docDetail.document.errorMessage" class="detail-label">错误信息</div>
+                        <div v-if="docDetail.document.errorMessage" class="detail-value" style="color: var(--danger);">{{ docDetail.document.errorMessage }}</div>
+                        <div class="detail-label">创建时间</div>
+                        <div class="detail-value">{{ formatTime(docDetail.document.createdAt) }}</div>
+                    </div>
+
+                    <h4 style="margin-top: 24px; margin-bottom: 12px;">分块列表 ({{ docDetail.chunks.length }})</h4>
+                    <div v-for="chunk in docDetail.chunks" :key="chunk.id" style="background: #f8fafc; border-radius: 8px; padding: 12px; margin-bottom: 8px;">
+                        <div style="display: flex; justify-content: space-between; margin-bottom: 4px;">
+                            <span style="font-weight: 600; font-size: 13px;">#{{ chunk.chunkIndex }}</span>
+                            <span style="font-size: 12px; color: var(--text-muted);">{{ chunk.contentLength }} 字符</span>
+                        </div>
+                        <div style="font-size: 13px; color: var(--text-muted); line-height: 1.5;">{{ chunk.content }}</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ========== 分块编辑模态框 ========== -->
+    <div v-if="showEditChunk" class="modal-overlay" @click.self="showEditChunk = false">
+        <div class="modal">
+            <div class="modal-header">
+                <h3>编辑分块 #{{ editChunk?.chunkIndex }}</h3>
+                <button class="modal-close" @click="showEditChunk = false">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="form-group">
+                    <label class="form-label">分块内容（修改后会自动重新向量化）</label>
+                    <textarea class="form-textarea" v-model="editChunkContent" style="min-height: 240px;"></textarea>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-outline" @click="showEditChunk = false">取消</button>
+                <button class="btn btn-primary" @click="saveChunk">保存并重新向量化</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- ========== 重新切分模态框 ========== -->
+    <div v-if="showResplit" class="modal-overlay" @click.self="showResplit = false">
+        <div class="modal" style="max-width: 480px;">
+            <div class="modal-header">
+                <h3>重新切分</h3>
+                <button class="modal-close" @click="showResplit = false">&times;</button>
+            </div>
+            <div class="modal-body">
+                <p style="color: var(--text-muted); margin-bottom: 16px;">
+                    将使用新的参数重新切分「{{ resplitDoc?.title }}」的原始文本，旧分块和向量将被删除。
+                </p>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label class="form-label">分块大小 (字符)</label>
+                        <input type="number" class="form-input" v-model.number="resplitChunkSize" min="1" max="10000">
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">重叠大小 (字符)</label>
+                        <input type="number" class="form-input" v-model.number="resplitOverlap" min="0" max="1000">
+                    </div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-outline" @click="showResplit = false">取消</button>
+                <button class="btn btn-primary" @click="doResplit">确认重新切分</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- ========== 重建结果模态框 ========== -->
+    <div v-if="showRebuildResult" class="modal-overlay" @click.self="showRebuildResult = false">
+        <div class="modal">
+            <div class="modal-header">
+                <h3>向量重建结果</h3>
+                <button class="modal-close" @click="showRebuildResult = false">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div v-if="rebuildResult" class="detail-grid">
+                    <div class="detail-label">文档总数</div>
+                    <div class="detail-value">{{ rebuildResult.total }}</div>
+                    <div class="detail-label">成功</div>
+                    <div class="detail-value" style="color: var(--success);">{{ rebuildResult.success }}</div>
+                    <div class="detail-label">失败</div>
+                    <div class="detail-value" style="color: var(--danger);">{{ rebuildResult.failed }}</div>
+                </div>
+
+                <div v-if="rebuildResult?.failures?.length > 0" style="margin-top: 20px;">
+                    <h4 style="margin-bottom: 12px;">失败详情</h4>
+                    <div v-for="(f, idx) in rebuildResult.failures" :key="idx"
+                         style="background: #fef2f2; border-radius: 8px; padding: 12px; margin-bottom: 8px;">
+                        <div style="font-weight: 600; font-size: 13px;">
+                            文档 #{{ f.documentId }}
+                            <span v-if="f.fileName"> - {{ f.fileName }}</span>
+                        </div>
+                        <div style="color: var(--danger); font-size: 13px; margin-top: 4px;">{{ f.error }}</div>
+                    </div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-primary" @click="showRebuildResult = false">关闭</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- ========== 版本操作结果模态框 ========== -->
+    <div v-if="showVersionResult" class="modal-overlay" @click.self="showVersionResult = false">
+        <div class="modal">
+            <div class="modal-header">
+                <h3>版本操作结果</h3>
+                <button class="modal-close" @click="showVersionResult = false">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div v-if="versionActionResult">
+                    <div style="font-size: 16px; font-weight: 600; margin-bottom: 16px;">{{ versionActionResult.message }}</div>
+                    <div class="detail-grid">
+                        <div v-if="versionActionResult.action" class="detail-label">操作类型</div>
+                        <div v-if="versionActionResult.action" class="detail-value">{{ versionActionResult.action }}</div>
+                        <div v-if="versionActionResult.newVersion" class="detail-label">新版本</div>
+                        <div v-if="versionActionResult.newVersion" class="detail-value">{{ versionActionResult.newVersion }}</div>
+                        <div v-if="versionActionResult.oldVersion" class="detail-label">旧版本</div>
+                        <div v-if="versionActionResult.oldVersion" class="detail-value">{{ versionActionResult.oldVersion }}</div>
+                        <div v-if="versionActionResult.fromVersion" class="detail-label">原版本</div>
+                        <div v-if="versionActionResult.fromVersion" class="detail-value">{{ versionActionResult.fromVersion }}</div>
+                        <div v-if="versionActionResult.toVersion" class="detail-label">目标版本</div>
+                        <div v-if="versionActionResult.toVersion" class="detail-value">{{ versionActionResult.toVersion }}</div>
+                        <div v-if="versionActionResult.totalVectors !== undefined" class="detail-label">向量数</div>
+                        <div v-if="versionActionResult.totalVectors !== undefined" class="detail-value">{{ versionActionResult.totalVectors }}</div>
+                        <div v-if="versionActionResult.successDocuments !== undefined" class="detail-label">成功文档</div>
+                        <div v-if="versionActionResult.successDocuments !== undefined" class="detail-value" style="color: var(--success);">{{ versionActionResult.successDocuments }}</div>
+                        <div v-if="versionActionResult.failedDocuments !== undefined" class="detail-label">失败文档</div>
+                        <div v-if="versionActionResult.failedDocuments !== undefined" class="detail-value" style="color: var(--danger);">{{ versionActionResult.failedDocuments }}</div>
+                        <div v-if="versionActionResult.deletedVectors !== undefined" class="detail-label">已删除向量</div>
+                        <div v-if="versionActionResult.deletedVectors !== undefined" class="detail-value" style="color: var(--danger);">{{ versionActionResult.deletedVectors }}</div>
+                    </div>
+
+                    <div v-if="versionActionResult.failures?.length > 0" style="margin-top: 20px;">
+                        <h4 style="margin-bottom: 12px;">失败详情</h4>
+                        <div v-for="(f, idx) in versionActionResult.failures" :key="idx"
+                             style="background: #fef2f2; border-radius: 8px; padding: 12px; margin-bottom: 8px;">
+                            <div style="font-weight: 600; font-size: 13px;">
+                                文档 #{{ f.documentId }}
+                                <span v-if="f.fileName"> - {{ f.fileName }}</span>
+                            </div>
+                            <div style="color: var(--danger); font-size: 13px; margin-top: 4px;">{{ f.error }}</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-primary" @click="showVersionResult = false">关闭</button>
+            </div>
+        </div>
+    </div>
+
+</div>
+
+<script src="api.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

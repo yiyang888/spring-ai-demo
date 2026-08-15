@@ -1,0 +1,61 @@
+HELP.md
+target/
+.mvn/wrapper/maven-wrapper.jar
+!**/src/main/**/target/
+!**/src/test/**/target/
+
+### STS ###
+.apt_generated
+.classpath
+.factorypath
+.project
+.settings
+.springBeans
+.sts4-cache
+
+### IntelliJ IDEA ###
+.idea
+*.iws
+*.iml
+*.ipr
+
+### NetBeans ###
+/nbproject/private/
+/nbbuild/
+/dist/
+/nbdist/
+/.nb-gradle/
+build/
+!**/src/main/**/build/
+!**/src/test/**/build/
+
+### VS Code ###
+.vscode/
+
+### 环境变量 & 敏感配置 ###
+.env
+.env.*
+application-local.yml
+application-local.properties
+application-secret.yml
+
+### 日志 ###
+logs/
+*.log
+
+### 操作系统 ###
+.DS_Store
+Thumbs.db
+desktop.ini
+
+### 临时文件 ###
+*.tmp
+*.bak
+*.swp
+*~
+
+### 测试上传文件 ###
+*.txt
+!**/src/**/*.txt
+src/main/java/cn/yiyang/langchain4j/controller/power*
+
